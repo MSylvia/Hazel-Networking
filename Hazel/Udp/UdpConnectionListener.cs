@@ -138,16 +138,22 @@ namespace Hazel.Udp
                 return;
             }
 
-            //Exit if no bytes read, we've closed.
+            // Exit if no bytes read, we've closed.
             if (bytesReceived == 0)
                 return;
 
-            //Copy to new buffer
-            byte[] buffer = new byte[bytesReceived];
-            Buffer.BlockCopy((byte[])result.AsyncState, 0, buffer, 0, bytesReceived);
-
-            //Begin receiving again
-            StartListeningForData();
+            byte[] buffer;
+            try
+            {
+                //Copy to new buffer
+                buffer = new byte[bytesReceived];
+                Buffer.BlockCopy((byte[])result.AsyncState, 0, buffer, 0, bytesReceived);
+            }
+            finally
+            {
+                //Begin receiving again
+                StartListeningForData();
+            }
 
             bool aware;
             UdpServerConnection connection;
@@ -261,19 +267,18 @@ namespace Hazel.Udp
         {
             lock (connections)
             {
-                var connects = this.connections.ToArray();
-                foreach (var kvp in connects)
+                foreach (var connection in this.connections.Values)
                 {
-                    if (kvp.Value.State == ConnectionState.Connected)
+                    if (connection.State == ConnectionState.Connected)
                     {
                         try
                         {
-                            kvp.Value.SendDisconnect();
+                            connection.SendDisconnect();
                         }
                         catch { }
                     }
 
-                    kvp.Value.Dispose();
+                    connection.Dispose();
                 }
 
                 connections.Clear();

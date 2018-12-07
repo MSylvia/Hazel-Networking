@@ -125,13 +125,14 @@ namespace Hazel.Udp
             if (disposing)
             {
                 //Send disconnect message if we're not already disconnecting
-                bool connected;
+                bool connected = State == ConnectionState.Connected;
 
-                lock (stateLock)
-                    connected = State == ConnectionState.Connected;
-
-                if (connected)
-                    SendDisconnect();
+                try
+                {
+                    if (connected)
+                        SendDisconnect();
+                }
+                catch { }
                 
                 Listener.RemoveConnectionTo(RemoteEndPoint);
 

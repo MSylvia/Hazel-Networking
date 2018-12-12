@@ -116,11 +116,12 @@ namespace Hazel.UnitTests
 
             listener.NewConnection += delegate(object sender, NewConnectionEventArgs args)
             {
+                Thread.Sleep(1);
                 args.Connection.Close();
             };
 
             listener.Start();
-
+            
             connection.Connect();
 
             mutex.WaitOne();

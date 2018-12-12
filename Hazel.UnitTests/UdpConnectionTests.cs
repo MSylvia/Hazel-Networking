@@ -280,13 +280,18 @@ namespace Hazel.UnitTests
 
                     Thread.Sleep(1050);    //Enough time for ~10 keep alive packets
 
-                    Assert.IsTrue(
-                        args.Connection.Statistics.TotalBytesSent >= 30 &&
-                        args.Connection.Statistics.TotalBytesSent <= 50,
-                        "Sent: " + args.Connection.Statistics.TotalBytesSent
-                    );
-
-                    mutex.Set();
+                    try
+                    {
+                        Assert.IsTrue(
+                            args.Connection.Statistics.TotalBytesSent >= 30 &&
+                            args.Connection.Statistics.TotalBytesSent <= 50,
+                            "Sent: " + args.Connection.Statistics.TotalBytesSent
+                        );
+                    }
+                    finally
+                    {
+                        mutex.Set();
+                    }
                 };
 
                 listener.Start();

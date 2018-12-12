@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
@@ -35,7 +36,7 @@ namespace Hazel.Udp
         /// <summary>
         ///     The packets of data that have been transmitted reliably and not acknowledged.
         /// </summary>
-        Dictionary<ushort, Packet> reliableDataPacketsSent = new Dictionary<ushort, Packet>();
+        ConcurrentDictionary<ushort, Packet> reliableDataPacketSent = new ConcurrentDictionary<ushort, Packet>();
 
         /// <summary>
         ///     The last packets that were received.
@@ -94,33 +95,68 @@ namespace Hazel.Udp
                 return objectPool.GetObject();
             }
 
-            public byte[] Data;
-            public Timer Timer;
+            private byte[] data;
+            private ushort id;
+            private int sendLength;
+            private UdpConnection connection;
+
+            private Timer Timer;
             public volatile int LastTimeout;
             public Action AckCallback;
-            public volatile bool Acknowledged;
             public volatile int Retransmissions;
             public Stopwatch Stopwatch = new Stopwatch();
-
+            
             Packet()
             {
+                this.Timer = new Timer(this.PerformCallback, null, Timeout.Infinite, Timeout.Infinite);
+            }
 
+            private void PerformCallback(object state)
+            {
+                if (this.connection == null) return;
+
+                if (this.Stopwatch.ElapsedMilliseconds > connection.disconnectTimeout)
+                {
+                    connection.HandleDisconnect(new HazelException($"Reliable packet {id} was not ack'd after {this.Retransmissions} resends"));
+
+                    this.Recycle();
+                    return;
+                }
+
+                lock (this.Timer)
+                {
+                    // Backoff retry frequency to avoid congestion
+                    this.LastTimeout = (int)Math.Min(this.LastTimeout * 1.5f, connection.disconnectTimeout / 4f);
+                    this.Timer.Change(this.LastTimeout, Timeout.Infinite);
+                }
+
+                try
+                {
+                    connection.WriteBytesToConnection(this.data, this.sendLength);
+                    connection.Statistics.LogResentMessage();
+                    this.Retransmissions++;
+                }
+                catch (InvalidOperationException e)
+                {
+                    //No longer connected
+                    connection.HandleDisconnect(new HazelException("Could not resend data as connection is no longer connected", e));
+                }
+
+                Trace.WriteLine("Resend.");
             }
             
-            internal void Set(byte[] data, Action<Packet> resendAction, int timeout, Action ackCallback)
+            internal void Set(UdpConnection connection, byte[] data, ushort id, int sendLength, int timeout, Action ackCallback)
             {
-                Data = data;
-                
-                Timer = new Timer(
-                    (object obj) => resendAction(this),
-                    null, 
-                    timeout,
-                    Timeout.Infinite
-                );
+                this.connection = connection;
+                this.data = data;
+                this.id = id;
+                this.sendLength = sendLength;
+
+                this.Timer.Change(timeout, Timeout.Infinite);
 
                 LastTimeout = timeout;
                 AckCallback = ackCallback;
-                Acknowledged = false;
+
                 Retransmissions = 0;
 
                 Stopwatch.Reset();
@@ -133,7 +169,11 @@ namespace Hazel.Udp
             public void Recycle()
             {
                 lock (Timer)
-                    Timer.Dispose();
+                    this.Timer.Change(Timeout.Infinite, Timeout.Infinite);
+
+                this.connection = null;
+                this.data = null;
+                this.AckCallback = null;
 
                 objectPool.PutObject(this);
             }
@@ -165,67 +205,36 @@ namespace Hazel.Udp
         /// <param name="ackCallback">The callback to make once the packet has been acknowledged.</param>
         void AttachReliableID(byte[] buffer, int offset, int sendLength, Action ackCallback = null)
         {
-            //Find and reliable ID
-            lock (reliableDataPacketsSent)
+            ushort id = 0;
+
+            //Create packet object
+            Packet packet = Packet.GetObject();
+
+            //Find an ID not used yet.
+            do
             {
-                //Find an ID not used yet.
-                ushort id;
+                id = ++lastIDAllocated;
+            } while (!reliableDataPacketSent.TryAdd(id, packet));
 
-                do
-                    id = ++lastIDAllocated;
-                while (reliableDataPacketsSent.ContainsKey(id));
+            //Write ID
+            buffer[offset] = (byte)((id >> 8) & 0xFF);
+            buffer[offset + 1] = (byte)id;
 
-                //Write ID
-                buffer[offset] = (byte)((id >> 8) & 0xFF);
-                buffer[offset + 1] = (byte)id;
+            packet.Set(
+                this,
+                buffer,
+                id,
+                sendLength,
+                resendTimeout > 0 ? resendTimeout : ClampToInt(AveragePingMs * 3, 40, this.disconnectTimeout / 3f),
+                ackCallback);
+        }
 
-                //Create packet object
-                Packet packet = Packet.GetObject();
-                packet.Set(
-                    buffer,
-                    (Packet p) =>
-                    {
-                        lock (p.Timer)
-                        {
-                            if (!p.Acknowledged)
-                            {
-                                // Backoff retry frequency to avoid congestion
-                                p.LastTimeout = (int)Math.Min(p.LastTimeout * 1.5f, this.disconnectTimeout / 2f);
-                                p.Timer.Change(p.LastTimeout, Timeout.Infinite);
+        private static int ClampToInt(float value, float min, float max)
+        {
+            if (value < min) return (int)min;
+            if (value > max) return (int)max;
 
-                                if (p.Stopwatch.ElapsedMilliseconds > this.disconnectTimeout)
-                                {
-                                    HandleDisconnect(new HazelException($"Reliable packet {id} was not ack'd after {p.Retransmissions} resends"));
-
-                                    //Set acknowledged so we dont change the timer again
-                                    p.Acknowledged = true;
-
-                                    p.Recycle();
-                                    return;
-                                }
-                            }
-                        }
-
-                        try
-                        {
-                            WriteBytesToConnection(p.Data, sendLength);
-                            p.Retransmissions++;
-                        }
-                        catch (InvalidOperationException e)
-                        {
-                            //No longer connected
-                            HandleDisconnect(new HazelException("Could not resend data as connection is no longer connected", e));
-                        }
-
-                        Trace.WriteLine("Resend.");
-                    },
-                    resendTimeout > 0 ? resendTimeout : (int)Math.Max(40, Math.Min(AveragePingMs * 4, 750)),
-                    ackCallback
-                );
-
-                //Remember packet
-                reliableDataPacketsSent.Add(id, packet);
-            }
+            return (int)value;
         }
 
         /// <summary>
@@ -304,6 +313,8 @@ namespace Hazel.Udp
         /// <returns>Whether the packet was a new packet or not.</returns>
         bool ProcessReliableReceive(byte[] bytes, int offset, out ushort id)
         {
+            ResetKeepAliveTimer();
+
             //Get the ID form the packet
             id = (ushort)((bytes[offset] << 8) + bytes[offset + 1]);
 
@@ -384,30 +395,27 @@ namespace Hazel.Udp
             //Get ID
             ushort id = (ushort)((bytes[1] << 8) + bytes[2]);
 
-            lock (reliableDataPacketsSent)
+            //Dispose of timer and remove from dictionary
+            Packet packet;
+            if (reliableDataPacketSent.TryRemove(id, out packet))
             {
-                //Dispose of timer and remove from dictionary
-                Packet packet;
-                if (reliableDataPacketsSent.TryGetValue(id, out packet))
-                {                    
-                    packet.Acknowledged = true;
+                if (packet.AckCallback != null)
+                    packet.AckCallback.Invoke();
 
-                    if (packet.AckCallback != null)
-                        packet.AckCallback.Invoke();
-
-                    //Add to average ping
-                    packet.Stopwatch.Stop();
-                    lock (PingLock)
-                    {
-                        this.AveragePingMs = Math.Max(10, this.AveragePingMs * .7f + (float)packet.Stopwatch.Elapsed.TotalMilliseconds * .3f);
-                    }
-
-                    packet.Recycle();
-
-                    reliableDataPacketsSent.Remove(id);
+                //Add to average ping
+                packet.Stopwatch.Stop();
+                lock (PingLock)
+                {
+                    this.AveragePingMs = Math.Max(10, this.AveragePingMs * .7f + (float)packet.Stopwatch.Elapsed.TotalMilliseconds * .3f);
                 }
+
+                packet.Recycle();
             }
-            
+            else
+            {
+                this.Statistics.LogDuplicateReceive();
+            }
+
             Statistics.LogReliableReceive(0, bytes.Length);
         }
 
@@ -436,17 +444,12 @@ namespace Hazel.Udp
 
         void DisposeReliablePackets()
         {
-            lock (this.reliableDataPacketsSent)
+            foreach (var kvp in this.reliableDataPacketSent)
             {
-                var packets = this.reliableDataPacketsSent.Keys.ToArray();
-                foreach (var kvp in this.reliableDataPacketsSent)
-                {
-                    Packet pkt = kvp.Value;
-                    pkt.Recycle();
-                }
-
-                this.reliableDataPacketsSent.Clear();
+                kvp.Value.Recycle();
             }
+
+            this.reliableDataPacketSent.Clear();
         }
     }
 }

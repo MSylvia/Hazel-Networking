@@ -23,7 +23,7 @@ namespace Hazel
                 return UnreliableMessagesSent + ReliableMessagesSent + FragmentedMessagesSent + AcknowledgementMessagesSent + HelloMessagesSent;
             }
         }
-
+        
         /// <summary>
         ///     The number of unreliable messages sent.
         /// </summary>
@@ -65,6 +65,19 @@ namespace Hazel
         ///     The number of unreliable messages sent.
         /// </summary>
         long reliableMessagesSent;
+
+        public long ReliableMessageResends
+        {
+            get
+            {
+                return Interlocked.Read(ref reliableMessageResends);
+            }
+        }
+
+        /// <summary>
+        /// Number of resent messages
+        /// </summary>
+        long reliableMessageResends;
 
         /// <summary>
         ///     The number of fragmented messages sent.
@@ -234,6 +247,22 @@ namespace Hazel
         long reliableMessagesReceived;
 
         /// <summary>
+        ///     The number of duplicate reliable messages received.
+        /// </summary>
+        public long ReliableDuplicatesReceived
+        {
+            get
+            {
+                return Interlocked.Read(ref reliableDuplicatesReceived);
+            }
+        }
+
+        /// <summary>
+        ///     The number of duplicate reliable messages received.
+        /// </summary>
+        long reliableDuplicatesReceived;
+
+        /// <summary>
         ///     The number of fragmented messages received.
         /// </summary>
         /// <remarks>
@@ -376,6 +405,14 @@ namespace Hazel
         }
 
         /// <summary>
+        ///     Logs the resending of a reliable data packet in the statistics.
+        /// </summary>
+        internal void LogResentMessage()
+        {
+            Interlocked.Increment(ref reliableMessageResends);
+        }
+
+        /// <summary>
         ///     Logs the sending of a fragmented data packet in the statistics.
         /// </summary>
         /// <param name="dataLength">The number of bytes of data sent.</param>
@@ -444,6 +481,11 @@ namespace Hazel
             Interlocked.Increment(ref reliableMessagesReceived);
             Interlocked.Add(ref dataBytesReceived, dataLength);
             Interlocked.Add(ref totalBytesReceived, totalLength);
+        }
+
+        internal void LogDuplicateReceive()
+        {
+            Interlocked.Increment(ref reliableDuplicatesReceived);
         }
 
         /// <summary>

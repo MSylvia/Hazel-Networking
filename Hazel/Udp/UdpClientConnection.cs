@@ -70,7 +70,7 @@ namespace Hazel.Udp
         }
 
         private void WriteBytesToConnectionReal(byte[] bytes, int length)
-        { 
+        {
             InvokeDataSentRaw(bytes, length);
 
             lock (stateLock)
@@ -243,6 +243,10 @@ namespace Hazel.Udp
             {
                 bytesReceived = socket.EndReceive(result);
             }
+            catch (NullReferenceException)
+            {
+                return;
+            }
             catch (ObjectDisposedException)
             {
                 //If the socket's been disposed then we can just end there.
@@ -321,19 +325,16 @@ namespace Hazel.Udp
         {
             if (disposing)
             {
-                //Send disconnect message if we're not already disconnecting
-                bool connected;
-                lock (stateLock)
-                    connected = State == ConnectionState.Connected;
-
-                if (connected)
+                // Send disconnect message if we're not already disconnecting
+                if (State == ConnectionState.Connected)
                     SendDisconnect();
 
-                //Dispose of the socket
-                lock (stateLock)
+                lock (this.stateLock)
                     State = ConnectionState.NotConnected;
+
             }
 
+            // Dispose of the socket
             if (socket != null)
             {
                 socket.Close();

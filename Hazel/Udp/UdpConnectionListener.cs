@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
@@ -27,7 +28,7 @@ namespace Hazel.Udp
         /// <summary>
         ///     The connections we currently hold
         /// </summary>
-        Dictionary<EndPoint, UdpServerConnection> connections = new Dictionary<EndPoint, UdpServerConnection>();
+        ConcurrentDictionary<EndPoint, UdpServerConnection> clients = new ConcurrentDictionary<EndPoint, UdpServerConnection>();
 
         /// <summary>
         ///     Creates a new UdpConnectionListener for the given <see cref="IPAddress"/>, port and <see cref="IPMode"/>.
@@ -73,7 +74,15 @@ namespace Hazel.Udp
         {
             try
             {
-                listener.Bind(EndPoint);
+                try
+                {
+                    listener.Bind(EndPoint);
+                }
+                catch
+                {
+                    System.Threading.Thread.Sleep(10);
+                    listener.Bind(EndPoint);
+                }
             }
             catch (SocketException e)
             {
@@ -93,6 +102,10 @@ namespace Hazel.Udp
             try
             {
                 listener.BeginReceiveFrom(dataBuffer, 0, dataBuffer.Length, SocketFlags.None, ref remoteEP, ReadCallback, dataBuffer);
+            }
+            catch (NullReferenceException)
+            {
+                return;
             }
             catch (ObjectDisposedException)
             {
@@ -120,6 +133,11 @@ namespace Hazel.Udp
             try
             {
                 bytesReceived = listener.EndReceiveFrom(result, ref remoteEndPoint);
+            }
+            catch (NullReferenceException)
+            {
+                //If the socket's been disposed then we can just end there.
+                return;
             }
             catch (ObjectDisposedException)
             {
@@ -155,33 +173,28 @@ namespace Hazel.Udp
                 StartListeningForData();
             }
 
-            bool aware;
+            bool added = false;
             UdpServerConnection connection;
-            lock (connections)
+            if (!this.clients.TryGetValue(remoteEndPoint, out connection))
             {
-                aware = connections.ContainsKey(remoteEndPoint);
-
-                //If we're aware of this connection use the one already
-                if (aware)
-                    connection = connections[remoteEndPoint];
-                
-                //If this is a new client then connect with them!
-                else
+                lock (this.clients)
                 {
-                    //Check for malformed connection attempts
-                    if (buffer[0] != (byte)UdpSendOption.Hello)
-                        return;
+                    if (!this.clients.TryGetValue(remoteEndPoint, out connection))
+                    {
+                        // If this is a new client then connect with them!
+                        // Check for malformed connection attempts
+                        if (buffer[0] != (byte)UdpSendOption.Hello)
+                            return;
 
-                    connection = new UdpServerConnection(this, remoteEndPoint, IPMode);
-                    connections.Add(remoteEndPoint, connection);
+                        connection = this.clients.GetOrAdd(remoteEndPoint, (key) => { added = true; return new UdpServerConnection(this, remoteEndPoint, IPMode); });
+                    }
                 }
             }
 
             //Inform the connection of the buffer (new connections need to send an ack back to client)
             connection.HandleReceive(buffer);
-            
-            //If it's a new connection invoke the NewConnection event.
-            if (!aware)
+
+            if (added)
             {
                 byte[] dataBuffer = new byte[buffer.Length - 3];
                 Buffer.BlockCopy(buffer, 3, dataBuffer, 0, buffer.Length - 3);
@@ -258,34 +271,33 @@ namespace Hazel.Udp
         /// <param name="endPoint">The endpoint of the virtual connection.</param>
         internal void RemoveConnectionTo(EndPoint endPoint)
         {
-            lock (connections)
-                connections.Remove(endPoint);
+            UdpServerConnection conn;
+            this.clients.TryRemove(endPoint, out conn);
         }
 
         /// <inheritdoc />
         protected override void Dispose(bool disposing)
         {
-            lock (connections)
+            foreach (var connection in this.clients.Values)
             {
-                foreach (var connection in this.connections.Values)
+                if (connection.State == ConnectionState.Connected)
                 {
-                    if (connection.State == ConnectionState.Connected)
+                    try
                     {
-                        try
-                        {
-                            connection.SendDisconnect();
-                        }
-                        catch { }
+                        connection.SendDisconnect();
                     }
-
-                    connection.Dispose();
+                    catch { }
                 }
 
-                connections.Clear();
+                connection.Dispose();
             }
+
+            this.clients.Clear();
+
 
             if (listener != null)
             {
+                listener.Shutdown(SocketShutdown.Both);
                 listener.Close();
                 this.listener.Dispose();
                 this.listener = null;

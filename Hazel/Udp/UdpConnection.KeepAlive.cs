@@ -58,23 +58,25 @@ namespace Hazel.Udp
             lock (keepAliveTimerLock)
             {
                 keepAliveTimer = new Timer(
-                    (o) =>
-                    {
-                        try
-                        {
-                            ReliableSend((byte)UdpSendOption.Hello); // TODO: Change to ping after server can handle it, before clients update
-                            Trace.WriteLine("Keepalive packet sent.");
-                        }
-                        catch
-                        {
-                            Trace.WriteLine("Keepalive packet failed to send.");
-                            DisposeKeepAliveTimer();
-                        }
-                    },
+                    SendKeepAlivePacket,
                     null,
                     keepAliveInterval,
                     keepAliveInterval
                 );
+            }
+        }
+
+        void SendKeepAlivePacket(object state)
+        {
+            try
+            {
+                ReliableSend((byte)UdpSendOption.Ping);
+                Trace.WriteLine("Keepalive packet sent.");
+            }
+            catch (Exception e)
+            {
+                Trace.WriteLine("Keepalive packet failed to send: " + e.Message);
+                DisposeKeepAliveTimer();
             }
         }
 
@@ -85,7 +87,10 @@ namespace Hazel.Udp
         {
             lock (keepAliveTimerLock)
             {
-                keepAliveTimer.Change(keepAliveInterval, keepAliveInterval);
+                if (keepAliveTimer != null)
+                {
+                    keepAliveTimer.Change(keepAliveInterval, keepAliveInterval);
+                }
             }
         }
 

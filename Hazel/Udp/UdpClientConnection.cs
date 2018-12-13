@@ -331,12 +331,18 @@ namespace Hazel.Udp
 
                 lock (this.stateLock)
                     State = ConnectionState.NotConnected;
-
             }
 
             // Dispose of the socket
             if (socket != null)
             {
+                try
+                {
+                    // Apparently Mono likes to throw on this, but it's good practice to shutdown...
+                    socket.Shutdown(SocketShutdown.Both);
+                }
+                catch { } 
+
                 socket.Close();
                 socket.Dispose();
                 socket = null;

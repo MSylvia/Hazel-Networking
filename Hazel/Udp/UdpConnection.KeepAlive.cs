@@ -70,7 +70,7 @@ namespace Hazel.Udp
         {
             try
             {
-                ReliableSend((byte)UdpSendOption.Ping);
+                ReliableSend((byte)UdpSendOption.Hello);
                 Trace.WriteLine("Keepalive packet sent.");
             }
             catch (Exception e)

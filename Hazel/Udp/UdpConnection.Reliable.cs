@@ -36,7 +36,7 @@ namespace Hazel.Udp
         /// <summary>
         ///     The packets of data that have been transmitted reliably and not acknowledged.
         /// </summary>
-        ConcurrentDictionary<ushort, Packet> reliableDataPacketSent = new ConcurrentDictionary<ushort, Packet>();
+        ConcurrentDictionary<ushort, Packet> reliableDataPacketsSent = new ConcurrentDictionary<ushort, Packet>();
 
         /// <summary>
         ///     The last packets that were received.
@@ -99,11 +99,13 @@ namespace Hazel.Udp
             private ushort id;
             private int sendLength;
             private UdpConnection connection;
+            private volatile int LastTimeout;
 
+            private object stateLock = new object();
             private Timer Timer;
-            public volatile int LastTimeout;
             public Action AckCallback;
-            public volatile int Retransmissions;
+            private volatile int Retransmissions;
+
             public Stopwatch Stopwatch = new Stopwatch();
             
             Packet()
@@ -113,7 +115,17 @@ namespace Hazel.Udp
 
             private void PerformCallback(object state)
             {
-                if (this.connection == null) return;
+                UdpConnection connection;
+                lock (this.stateLock)
+                {
+                    // Capture state to avoid null ref
+                    if (this.connection == null) return;
+                    connection = this.connection;
+
+                    // Backoff retry frequency to avoid congestion
+                    this.LastTimeout = ClampToInt(this.LastTimeout * 1.5f, 50, connection.disconnectTimeout / 4f);
+                    this.Timer.Change(this.LastTimeout, Timeout.Infinite);
+                }
 
                 if (this.Stopwatch.ElapsedMilliseconds > connection.disconnectTimeout)
                 {
@@ -121,13 +133,6 @@ namespace Hazel.Udp
 
                     this.Recycle();
                     return;
-                }
-
-                lock (this.Timer)
-                {
-                    // Backoff retry frequency to avoid congestion
-                    this.LastTimeout = (int)Math.Min(this.LastTimeout * 1.5f, connection.disconnectTimeout / 4f);
-                    this.Timer.Change(this.LastTimeout, Timeout.Infinite);
                 }
 
                 try
@@ -152,15 +157,13 @@ namespace Hazel.Udp
                 this.id = id;
                 this.sendLength = sendLength;
 
+                this.LastTimeout = timeout;
+                this.AckCallback = ackCallback;
+
+                this.Retransmissions = 0;
+
                 this.Timer.Change(timeout, Timeout.Infinite);
-
-                LastTimeout = timeout;
-                AckCallback = ackCallback;
-
-                Retransmissions = 0;
-
-                Stopwatch.Reset();
-                Stopwatch.Start();
+                this.Stopwatch.Restart();
             }
 
             /// <summary>
@@ -168,12 +171,14 @@ namespace Hazel.Udp
             /// </summary>
             public void Recycle()
             {
-                lock (Timer)
+                lock (stateLock)
+                {
                     this.Timer.Change(Timeout.Infinite, Timeout.Infinite);
 
-                this.connection = null;
-                this.data = null;
-                this.AckCallback = null;
+                    this.connection = null;
+                    this.data = null;
+                    this.AckCallback = null;
+                }
 
                 objectPool.PutObject(this);
             }
@@ -184,15 +189,20 @@ namespace Hazel.Udp
             public void Dispose()
             {
                 Dispose(true);
-                GC.SuppressFinalize(this);
             }
 
             protected void Dispose(bool disposing)
             {
                 if (disposing)
                 {
-                    lock (Timer)
-                        Timer.Dispose();
+                    lock (stateLock)
+                    {
+                        if (this.Timer != null)
+                        {
+                            this.Timer.Dispose();
+                            this.Timer = null;
+                        }
+                    }
                 }
             }
         }
@@ -205,16 +215,16 @@ namespace Hazel.Udp
         /// <param name="ackCallback">The callback to make once the packet has been acknowledged.</param>
         void AttachReliableID(byte[] buffer, int offset, int sendLength, Action ackCallback = null)
         {
-            ushort id = 0;
-
             //Create packet object
             Packet packet = Packet.GetObject();
+
+            ushort id = 0;
 
             //Find an ID not used yet.
             do
             {
                 id = ++lastIDAllocated;
-            } while (!reliableDataPacketSent.TryAdd(id, packet));
+            } while (!reliableDataPacketsSent.TryAdd(id, packet));
 
             //Write ID
             buffer[offset] = (byte)((id >> 8) & 0xFF);
@@ -397,13 +407,14 @@ namespace Hazel.Udp
 
             //Dispose of timer and remove from dictionary
             Packet packet;
-            if (reliableDataPacketSent.TryRemove(id, out packet))
+            if (reliableDataPacketsSent.TryRemove(id, out packet))
             {
+                packet.Stopwatch.Stop();
+
                 if (packet.AckCallback != null)
                     packet.AckCallback.Invoke();
 
                 //Add to average ping
-                packet.Stopwatch.Stop();
                 lock (PingLock)
                 {
                     this.AveragePingMs = Math.Max(10, this.AveragePingMs * .7f + (float)packet.Stopwatch.Elapsed.TotalMilliseconds * .3f);
@@ -444,12 +455,12 @@ namespace Hazel.Udp
 
         void DisposeReliablePackets()
         {
-            foreach (var kvp in this.reliableDataPacketSent)
+            foreach (var kvp in this.reliableDataPacketsSent)
             {
                 kvp.Value.Recycle();
             }
 
-            this.reliableDataPacketSent.Clear();
+            this.reliableDataPacketsSent.Clear();
         }
     }
 }

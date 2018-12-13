@@ -101,6 +101,7 @@ namespace Hazel.Udp
             
             try
             {
+                if (listener == null) return;
                 listener.BeginReceiveFrom(dataBuffer, 0, dataBuffer.Length, SocketFlags.None, ref remoteEP, ReadCallback, dataBuffer);
             }
             catch (NullReferenceException)
